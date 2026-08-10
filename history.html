@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>EcoResonance AI — History &amp; Trends</title>
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<div id="shellRoot"></div>
+
+<script src="js/cities.js"></script>
+<script src="js/api.js"></script>
+<script src="js/eri-engine.js"></script>
+<script src="js/layout.js"></script>
+<script>
+renderShell("history", "History &amp; Trends", "Historical environmental data and trend analysis — real archive data");
+
+document.getElementById("pageBody").innerHTML = `
+  <div class="page-header-row" style="margin-top:-10px;">
+    <div></div>
+    <div class="controls-row">
+      <select class="select" id="citySelect"></select>
+      <select class="select" id="rangeSelect">
+        <option value="7">7 Days</option>
+        <option value="30">30 Days</option>
+        <option value="90">3 Months</option>
+        <option value="365">1 Year</option>
+      </select>
+    </div>
+  </div>
+
+  <div id="loadStatus" class="loading-note">Fetching real historical data…</div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title" id="eriChartTitle">ERI Trend</div>
+      <canvas id="eriHistChart" height="230"></canvas>
+    </div>
+    <div class="card">
+      <div class="card-title">Environmental Parameters Trend</div>
+      <canvas id="paramHistChart" height="230"></canvas>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">Historical Data Overview</div>
+      <div style="max-height:340px;overflow:auto;">
+        <table id="histTable"><thead><tr><th>Date</th><th>ERI</th><th>Temp (°C)</th><th>Rainfall (mm)</th><th>Humidity (%)</th><th>Wind (km/h)</th><th>Pressure (hPa)</th></tr></thead><tbody></tbody></table>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-title">Insights</div>
+      <div id="insightsPanel" style="font-size:13px;line-height:1.9;color:var(--text-secondary);"></div>
+    </div>
+  </div>
+`;
+
+document.getElementById("citySelect").innerHTML = CITY_LIST.map(c => `<option value="${c.name}">${c.name}, ${c.state}</option>`).join("");
+document.getElementById("citySelect").value = "Kolkata";
+
+document.getElementById("citySelect").addEventListener("change", loadHistory);
+document.getElementById("rangeSelect").addEventListener("change", loadHistory);
+
+async function loadHistory() {
+  const status = document.getElementById("loadStatus");
+  status.style.display = "block"; status.className = "loading-note";
+  status.textContent = "Fetching real historical data…";
+
+  const cityName = document.getElementById("citySelect").value;
+  const days = parseInt(document.getElementById("rangeSelect").value, 10);
+  const city = CITY_LIST.find(c => c.name === cityName);
+
+  try {
+    const hist = await API.fetchHistory(city, days);
+    if (hist.length === 0) throw new Error("No archive data returned for this range.");
+    status.style.display = "none";
+    renderHistory(city, hist);
+  } catch (err) {
+    status.className = "error-note";
+    status.textContent = "Historical data fetch failed: " + err.message;
+    console.error(err);
+  }
+}
+
+function renderHistory(city, hist) {
+  document.getElementById("eriChartTitle").textContent = `ERI Trend — ${city.name}, ${city.state}`;
+
+  const labels = hist.map(h => new Date(h.date).toLocaleDateString("en-IN", { day: "2-digit", month: "short" }));
+
+  const eriSeries = hist.map(h => ERI_ENGINE.computeERI({
+    ...city, precipitation: h.rainfall, windSpeed: h.windMax,
+    humidity: h.humidity, pressure: h.pressure, temperature: h.tempMax
+  }, []).eri);
+
+  drawLineChart("eriHistChart", labels, eriSeries, "ERI");
+
+  drawMultiLineChart("paramHistChart", labels, [
+    { name: "Temp (°C)", values: hist.map(h => h.tempMax), color: "#d9362e" },
+    { name: "Rainfall (mm)", values: hist.map(h => h.rainfall), color: "#2b7de9" },
+    { name: "Humidity (%)", values: hist.map(h => h.humidity), color: "#22a35a" },
+    { name: "Wind (km/h)", values: hist.map(h => h.windMax), color: "#e6b800" }
+  ]);
+
+  const tbody = document.querySelector("#histTable tbody");
+  tbody.innerHTML = hist.slice().reverse().map((h, i) => `
+    <tr>
+      <td>${new Date(h.date).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" })}</td>
+      <td><strong>${eriSeries[hist.length - 1 - i].toFixed(2)}</strong></td>
+      <td>${h.tempMax != null ? h.tempMax.toFixed(1) : "—"}</td>
+      <td>${h.rainfall != null ? h.rainfall.toFixed(1) : "—"}</td>
+      <td>${h.humidity != null ? h.humidity.toFixed(0) : "—"}</td>
+      <td>${h.windMax != null ? h.windMax.toFixed(1) : "—"}</td>
+      <td>${h.pressure != null ? h.pressure.toFixed(0) : "—"}</td>
+    </tr>
+  `).join("");
+
+  renderInsights(city, hist, eriSeries);
+}
+
+function renderInsights(city, hist, eriSeries) {
+  const insights = [];
+  const firstERI = eriSeries[0], lastERI = eriSeries[eriSeries.length - 1];
+  if (firstERI > 0) {
+    const pctChange = ((lastERI - firstERI) / firstERI) * 100;
+    insights.push(`ERI has ${pctChange >= 0 ? "increased" : "decreased"} by ${Math.abs(pctChange).toFixed(0)}% over the selected period, based on real archived readings.`);
+  }
+
+  const totalRain = hist.reduce((s, h) => s + (h.rainfall || 0), 0);
+  const rainDays = hist.filter(h => h.rainfall > 1).length;
+  insights.push(`Total recorded rainfall: ${totalRain.toFixed(1)} mm across ${rainDays} of ${hist.length} days.`);
+
+  const avgHumidity = hist.reduce((s, h) => s + (h.humidity || 0), 0) / hist.length;
+  insights.push(`Average humidity over the period: ${avgHumidity.toFixed(0)}%${avgHumidity >= 70 ? " — consistently high." : "."}`);
+
+  const maxWind = Math.max(...hist.map(h => h.windMax || 0));
+  insights.push(`Peak recorded wind speed: ${maxWind.toFixed(1)} km/h.`);
+
+  // Correlate rainfall trend with ERI trend, in the spirit of the source spec
+  const rainTrend = hist[hist.length - 1].rainfall - hist[0].rainfall;
+  if (rainTrend > 5 && lastERI > firstERI) {
+    insights.push(`Rising rainfall appears to be a contributing factor to the increase in ERI over this window.`);
+  }
+
+  document.getElementById("insightsPanel").innerHTML = insights.map(i => `<div>\u{1F538} ${i}</div>`).join("");
+}
+
+loadHistory();
+</script>
+<script src="js/charts.js"></script>
+</body>
+</html>

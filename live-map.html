@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>EcoResonance AI — Live Weather &amp; Hazard Map</title>
+<link rel="stylesheet" href="css/style.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+</head>
+<body>
+<div id="shellRoot"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="js/cities.js"></script>
+<script src="js/api.js"></script>
+<script src="js/eri-engine.js"></script>
+<script src="js/layout.js"></script>
+<script>
+renderShell("live-map", "Live Weather &amp; Hazard Map", "Real-time environmental conditions across India");
+
+document.getElementById("pageBody").innerHTML = `
+  <div class="layer-tabs" id="layerTabs"></div>
+
+  <div id="loadStatus" class="loading-note">Fetching live weather, air-quality and seismic data…</div>
+
+  <div class="map-shell">
+    <div style="position:relative;">
+      <div id="leafletMap"></div>
+      <div class="legend-box" id="mapLegend"></div>
+    </div>
+
+    <div style="display:flex; flex-direction:column; gap:14px;">
+      <div class="card">
+        <div class="card-title">Live Hazard Overview</div>
+        <div class="card-sub">Derived from real, live signals — not a tracked storm system</div>
+        <div id="hazardOverview"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">India Summary (Live)</div>
+        <div id="indiaSummary"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Live Data Status</div>
+        <div id="dataStatus" style="font-size:12.5px;"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:14px;">
+    <div class="card-title">Quick City Snapshot <span style="font-weight:500;font-size:11.5px;color:var(--text-muted);">(click a city for details)</span></div>
+    <div class="snapshot-strip" id="snapshotStrip"></div>
+  </div>
+`;
+
+const LAYERS = [
+  { key: "rainfall", label: "Rainfall", icon: "\u{1F327}\uFE0F" },
+  { key: "cloud", label: "Cloud Cover", icon: "\u2601\uFE0F" },
+  { key: "wind", label: "Wind Flow", icon: "\u{1F32C}\uFE0F" },
+  { key: "temperature", label: "Temperature", icon: "\u{1F321}\uFE0F" },
+  { key: "pressure", label: "Pressure", icon: "\u{1F4CA}" },
+  { key: "aqi", label: "AQI", icon: "\u{1F32B}\uFE0F" },
+  { key: "seismic", label: "Seismic", icon: "\u{1F30D}" }
+];
+
+let currentLayer = "rainfall";
+let map, markerLayer, heatLayer;
+let liveCities = [], seismicEvents = [];
+
+document.getElementById("layerTabs").innerHTML = LAYERS.map(l => `
+  <div class="layer-tab ${l.key === currentLayer ? "active" : ""}" data-layer="${l.key}">${l.icon} ${l.label}</div>
+`).join("");
+
+document.getElementById("layerTabs").addEventListener("click", e => {
+  const tab = e.target.closest(".layer-tab");
+  if (!tab) return;
+  currentLayer = tab.dataset.layer;
+  document.querySelectorAll(".layer-tab").forEach(t => t.classList.toggle("active", t === tab));
+  drawLayer();
+});
+
+async function init() {
+  const status = document.getElementById("loadStatus");
+  try {
+    const [live, seismic] = await Promise.all([
+      API.fetchLiveBatch(CITY_LIST, (done, total) => { status.textContent = `Fetching live data… ${done}/${total} cities`; }),
+      API.fetchSeismic()
+    ]);
+    liveCities = live.map(c => ({ ...c, ...ERI_ENGINE.computeERI(c, seismic) }));
+    seismicEvents = seismic;
+    status.style.display = "none";
+
+    const avgERI = liveCities.reduce((s, c) => s + c.eri, 0) / liveCities.length;
+    const avgState = ERI_ENGINE.STATES.find(s => avgERI <= s.max);
+    document.getElementById("earthMoodState").textContent = avgState.label;
+    document.getElementById("earthMoodScore").textContent = `ERI ${avgERI.toFixed(2)} / 1.00`;
+    document.getElementById("sidebarAlertBadge").textContent = liveCities.filter(c => c.eri >= 0.5).length;
+
+    initMap();
+    drawLayer();
+    renderHazardOverview();
+    renderIndiaSummary();
+    renderDataStatus();
+    renderSnapshotStrip();
+
+    // Deep-link from dashboard search
+    const params = new URLSearchParams(window.location.search);
+    const q = params.get("city");
+    if (q) {
+      const match = liveCities.find(c => c.name.toLowerCase() === q.toLowerCase());
+      if (match) { map.setView([match.lat, match.lon], 8); L.popup().setLatLng([match.lat, match.lon]).setContent(cityPopupHTML(match)).openOn(map); }
+    }
+  } catch (err) {
+    status.className = "error-note";
+    status.textContent = "Live data fetch failed: " + err.message;
+    console.error(err);
+  }
+}
+
+function initMap() {
+  map = L.map("leafletMap").setView([22.5, 79.5], 4.6);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 12, attribution: "&copy; OpenStreetMap contributors"
+  }).addTo(map);
+  markerLayer = L.layerGroup().addTo(map);
+}
+
+function layerValue(c, key) {
+  switch (key) {
+    case "rainfall": return c.precipitation;
+    case "cloud": return c.cloudCover;
+    case "wind": return c.windSpeed;
+    case "temperature": return c.temperature;
+    case "pressure": return c.pressure;
+    case "aqi": return c.aqi;
+    case "seismic": return c.nearbySeismic?.length ? Math.max(...c.nearbySeismic.map(q => q.magnitude)) : 0;
+  }
+}
+
+function layerColor(key, v) {
+  if (v == null) return "#c7cfca";
+  const scales = {
+    rainfall: [[0, "#22a35a"], [5, "#e6b800"], [20, "#e8792c"], [50, "#d9362e"]],
+    cloud: [[0, "#22a35a"], [30, "#7fb8e0"], [60, "#3f7fc9"], [90, "#274b7a"]],
+    wind: [[0, "#22a35a"], [20, "#e6b800"], [45, "#e8792c"], [70, "#d9362e"]],
+    temperature: [[10, "#2b7de9"], [25, "#22a35a"], [35, "#e8792c"], [44, "#d9362e"]],
+    pressure: [[985, "#d9362e"], [1005, "#e8792c"], [1013, "#22a35a"], [1025, "#2b7de9"]],
+    aqi: [[0, "#22a35a"], [100, "#e6b800"], [200, "#e8792c"], [300, "#d9362e"]],
+    seismic: [[0, "#22a35a"], [3, "#e6b800"], [5, "#e8792c"], [6.5, "#d9362e"]]
+  };
+  const scale = scales[key];
+  let color = scale[0][1];
+  for (const [thresh, c] of scale) if (v >= thresh) color = c;
+  return color;
+}
+
+function drawLayer() {
+  if (!map) return;
+  markerLayer.clearLayers();
+
+  const seismicCities = currentLayer === "seismic" ? liveCities.filter(c => c.nearbySeismic?.length) : liveCities;
+
+  seismicCities.forEach(c => {
+    const v = layerValue(c, currentLayer);
+    const color = layerColor(currentLayer, v);
+    const radius = currentLayer === "seismic" ? 5 + (v || 0) * 2 : 5;
+    L.circleMarker([c.lat, c.lon], {
+      radius, color, fillColor: color, fillOpacity: 0.75, weight: 1
+    }).bindPopup(cityPopupHTML(c)).addTo(markerLayer);
+  });
+
+  renderLegend();
+}
+
+function cityPopupHTML(c) {
+  return `
+    <div style="font-family:Inter,sans-serif;min-width:180px;">
+      <strong>${c.name}, ${c.state}</strong><br/>
+      <span style="color:${c.color};font-weight:700;">ERI ${c.eri.toFixed(2)} — ${c.state ? "" : ""}${c.state}</span><br/>
+      <div style="margin-top:6px;font-size:12px;line-height:1.6;">
+        🌡️ ${c.temperature?.toFixed(1) ?? "—"}°C &nbsp; 💧 ${c.humidity ?? "—"}%<br/>
+        🌧️ ${c.precipitation?.toFixed(1) ?? "—"} mm &nbsp; 💨 ${c.windSpeed?.toFixed(1) ?? "—"} km/h<br/>
+        🌫️ AQI ${c.aqi ?? "—"} &nbsp; 📊 ${c.pressure?.toFixed(0) ?? "—"} hPa
+      </div>
+    </div>`;
+}
+
+function renderLegend() {
+  const legends = {
+    rainfall: [["≥50 mm — Extremely Heavy", "#d9362e"], ["20–50 mm — Heavy", "#e8792c"], ["5–20 mm — Moderate", "#e6b800"], ["0–5 mm — Light/None", "#22a35a"]],
+    cloud: [["90–100% — Overcast", "#274b7a"], ["60–90% — Broken", "#3f7fc9"], ["30–60% — Scattered", "#7fb8e0"], ["0–30% — Clear", "#22a35a"]],
+    wind: [["≥70 km/h — Severe", "#d9362e"], ["45–70 km/h — Strong", "#e8792c"], ["20–45 km/h — Moderate", "#e6b800"], ["0–20 km/h — Light", "#22a35a"]],
+    temperature: [["≥44°C — Extreme", "#d9362e"], ["35–44°C — High", "#e8792c"], ["25–35°C — Moderate", "#22a35a"], ["<25°C — Cool", "#2b7de9"]],
+    pressure: [["≥1025 hPa — High", "#2b7de9"], ["1013–1025 — Normal", "#22a35a"], ["1005–1013 — Low", "#e8792c"], ["<1005 — Very Low", "#d9362e"]],
+    aqi: [["≥300 — Hazardous", "#d9362e"], ["200–300 — Very Poor", "#e8792c"], ["100–200 — Moderate", "#e6b800"], ["0–100 — Good", "#22a35a"]],
+    seismic: [["≥6.5 — Major", "#d9362e"], ["5–6.5 — Moderate", "#e8792c"], ["3–5 — Minor", "#e6b800"], ["Recorded, <3", "#22a35a"]]
+  };
+  const rows = legends[currentLayer];
+  document.getElementById("mapLegend").innerHTML =
+    `<div style="font-weight:700;margin-bottom:4px;">${LAYERS.find(l=>l.key===currentLayer).label} — live</div>` +
+    rows.map(([label, color]) => `<div class="legend-row"><span class="legend-swatch" style="background:${color}"></span>${label}</div>`).join("") +
+    `<div style="margin-top:4px;color:#8a968f;">Source: Open-Meteo${currentLayer === "seismic" ? " / USGS" : ""}</div>`;
+}
+
+function renderHazardOverview() {
+  // Real, derived (not a tracked cyclone). Ranked by severity across live cities.
+  const cards = [];
+  const strongWind = [...liveCities].sort((a, b) => (b.windSpeed||0) - (a.windSpeed||0))[0];
+  if (strongWind && strongWind.windSpeed >= 35) {
+    cards.push({
+      icon: "\u{1F32C}\uFE0F", title: "Elevated Wind Risk",
+      risk: strongWind.windSpeed >= 60 ? "High Risk" : "Moderate Risk",
+      body: `${strongWind.name}, ${strongWind.state}: sustained wind ${strongWind.windSpeed.toFixed(0)} km/h and surface pressure ${strongWind.pressure?.toFixed(0) ?? "—"} hPa. Derived from live wind/pressure readings — not a tracked cyclone.`
+    });
+  }
+  const heavyRain = [...liveCities].sort((a, b) => (b.precipitation||0) - (a.precipitation||0))[0];
+  if (heavyRain && heavyRain.precipitation >= 5) {
+    cards.push({
+      icon: "\u{1F327}\uFE0F", title: "Heavy Rainfall",
+      risk: heavyRain.precipitation >= 20 ? "High Risk" : "Moderate Risk",
+      body: `${heavyRain.name}, ${heavyRain.state}: ${heavyRain.precipitation.toFixed(1)} mm live precipitation reading.`
+    });
+  }
+  const hotCity = [...liveCities].sort((a, b) => (b.temperature||0) - (a.temperature||0))[0];
+  if (hotCity && hotCity.temperature >= 37) {
+    cards.push({
+      icon: "\u{1F525}", title: "Heat Stress",
+      risk: hotCity.temperature >= 42 ? "High Risk" : "Moderate Risk",
+      body: `${hotCity.name}, ${hotCity.state}: live temperature ${hotCity.temperature.toFixed(1)}°C.`
+    });
+  }
+  const dirtyAir = [...liveCities].sort((a, b) => (b.aqi||0) - (a.aqi||0))[0];
+  if (dirtyAir && dirtyAir.aqi >= 100) {
+    cards.push({
+      icon: "\u{1F32B}\uFE0F", title: "Poor Air Quality",
+      risk: dirtyAir.aqi >= 200 ? "High Risk" : "Moderate Risk",
+      body: `${dirtyAir.name}, ${dirtyAir.state}: live US AQI ${dirtyAir.aqi}.`
+    });
+  }
+  if (seismicEvents.length > 0) {
+    const strongest = [...seismicEvents].sort((a,b)=>b.magnitude-a.magnitude)[0];
+    cards.push({
+      icon: "\u{1F30D}", title: "Seismic Activity (monitoring only)",
+      risk: strongest.magnitude >= 5 ? "Moderate Risk" : "Low Risk",
+      body: `M${strongest.magnitude.toFixed(1)} — ${strongest.place}. USGS, past 24h. This is a monitoring signal, not a prediction.`
+    });
+  }
+  if (cards.length === 0) {
+    cards.push({ icon: "\u2705", title: "No Elevated Hazards", risk: "Low Risk", body: "All monitored signals are within calm baseline ranges right now." });
+  }
+
+  document.getElementById("hazardOverview").innerHTML = cards.map(c => `
+    <div class="alert-row">
+      <div class="alert-icon" style="background:${c.risk==="High Risk"?"var(--anxious)22":"var(--stressed)22"};color:${c.risk==="High Risk"?"var(--anxious)":"var(--stressed)"}">${c.icon}</div>
+      <div>
+        <div class="alert-title">${c.title} <span class="severity-badge ${c.risk==="High Risk"?"sev-high":"sev-medium"}">${c.risk}</span></div>
+        <div class="alert-meta" style="max-width:230px;">${c.body}</div>
+      </div>
+    </div>
+  `).join("");
+}
+
+function renderIndiaSummary() {
+  const total = liveCities.length;
+  const heavy = liveCities.filter(c => c.precipitation >= 20).length;
+  const moderate = liveCities.filter(c => c.precipitation >= 5 && c.precipitation < 20).length;
+  const light = liveCities.filter(c => c.precipitation > 0 && c.precipitation < 5).length;
+  document.getElementById("indiaSummary").innerHTML = `
+    <div class="param-row"><span class="param-icon">\u{1F327}\uFE0F</span><span class="param-name">Stations w/ Heavy Rainfall</span><span class="param-value">${((heavy/total)*100).toFixed(0)}%</span></div>
+    <div class="param-row"><span class="param-icon">\u{1F326}\uFE0F</span><span class="param-name">Stations w/ Moderate Rainfall</span><span class="param-value">${((moderate/total)*100).toFixed(0)}%</span></div>
+    <div class="param-row"><span class="param-icon">\u{1F324}\uFE0F</span><span class="param-name">Stations w/ Light Rainfall</span><span class="param-value">${((light/total)*100).toFixed(0)}%</span></div>
+    <div class="param-row"><span class="param-icon">\u{1F30C}\uFE0F</span><span class="param-name">Avg. Wind Speed</span><span class="param-value">${(liveCities.reduce((s,c)=>s+(c.windSpeed||0),0)/total).toFixed(1)} km/h</span></div>
+  `;
+}
+
+function renderDataStatus() {
+  const online = liveCities.filter(c => c.temperature !== null).length;
+  document.getElementById("dataStatus").innerHTML = `
+    <div class="param-row"><span class="param-icon">\u{1F7E2}</span><span class="param-name">Weather</span><span class="param-value">Operational</span></div>
+    <div class="param-row"><span class="param-icon">\u{1F7E2}</span><span class="param-name">Air Quality</span><span class="param-value">Operational</span></div>
+    <div class="param-row"><span class="param-icon">\u{1F7E2}</span><span class="param-name">Seismic (USGS)</span><span class="param-value">Operational</span></div>
+    <div class="param-row"><span class="param-icon">\u2139\uFE0F</span><span class="param-name">Cities reporting</span><span class="param-value">${online}/${liveCities.length}</span></div>
+  `;
+}
+
+function renderSnapshotStrip() {
+  const top6 = [...liveCities].sort((a,b) => b.eri - a.eri).slice(0, 6);
+  document.getElementById("snapshotStrip").innerHTML = top6.map(c => `
+    <div class="snapshot-card" data-name="${c.name}">
+      <div class="sc-name">${c.name}</div>
+      <div class="sc-temp">${c.temperature?.toFixed(0) ?? "—"}°C</div>
+      <div class="sc-eri" style="color:${c.color}">ERI ${c.eri.toFixed(2)} · ${c.state}</div>
+    </div>
+  `).join("");
+  document.getElementById("snapshotStrip").addEventListener("click", e => {
+    const card = e.target.closest(".snapshot-card");
+    if (!card) return;
+    const c = liveCities.find(x => x.name === card.dataset.name);
+    map.setView([c.lat, c.lon], 8);
+    L.popup().setLatLng([c.lat, c.lon]).setContent(cityPopupHTML(c)).openOn(map);
+  });
+}
+
+init();
+</script>
+</body>
+</html>

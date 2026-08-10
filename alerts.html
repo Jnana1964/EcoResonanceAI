@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>EcoResonance AI — Alerts</title>
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<div id="shellRoot"></div>
+
+<script src="js/cities.js"></script>
+<script src="js/api.js"></script>
+<script src="js/eri-engine.js"></script>
+<script src="js/layout.js"></script>
+<script>
+renderShell("alerts", "Active Environmental Alerts", "Real-time warnings and advisories generated from live signals across India");
+
+document.getElementById("pageBody").innerHTML = `
+  <div id="loadStatus" class="loading-note">Fetching live data to generate alerts…</div>
+
+  <div class="summary-cards" id="summaryCards"></div>
+
+  <div class="filter-bar">
+    <select class="select" id="sevFilter">
+      <option value="all">All Severity</option>
+      <option value="High">High</option>
+      <option value="Moderate">Medium</option>
+      <option value="Low">Low</option>
+    </select>
+    <select class="select" id="typeFilter"><option value="all">All Types</option></select>
+    <select class="select" id="regionFilter"><option value="all">All Regions</option></select>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead><tr><th>Alert Type</th><th>Location</th><th>Severity</th><th>Description</th><th>Time</th></tr></thead>
+      <tbody id="alertsBody"></tbody>
+    </table>
+    <div id="alertsEmpty" style="display:none;text-align:center;color:var(--text-muted);padding:24px;">No alerts match the selected filters.</div>
+  </div>
+`;
+
+let allAlerts = [];
+
+async function loadAlerts() {
+  const status = document.getElementById("loadStatus");
+  try {
+    const [live, seismic] = await Promise.all([
+      API.fetchLiveBatch(CITY_LIST, (done, total) => { status.textContent = `Fetching live data… ${done}/${total} cities`; }),
+      API.fetchSeismic()
+    ]);
+    const cities = live.map(c => ({ ...c, ...ERI_ENGINE.computeERI(c, seismic) }));
+
+    const avgERI = cities.reduce((s, c) => s + c.eri, 0) / cities.length;
+    const avgState = ERI_ENGINE.STATES.find(s => avgERI <= s.max);
+    document.getElementById("earthMoodState").textContent = avgState.label;
+    document.getElementById("earthMoodScore").textContent = `ERI ${avgERI.toFixed(2)} / 1.00`;
+
+    allAlerts = buildAlerts(cities);
+    document.getElementById("sidebarAlertBadge").textContent = allAlerts.length;
+    status.style.display = "none";
+
+    populateFilterOptions();
+    renderAlerts();
+  } catch (err) {
+    status.className = "error-note";
+    status.textContent = "Live data fetch failed: " + err.message;
+    console.error(err);
+  }
+}
+
+function buildAlerts(cities) {
+  const alerts = [];
+  const now = new Date();
+  const timeStr = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+
+  cities.forEach(c => {
+    const hazards = ERI_ENGINE.assessHazards(c, c);
+    hazards.forEach(h => {
+      if (h.risk === "Low") return; // only surface real, above-baseline conditions
+      alerts.push({
+        type: h.type,
+        location: `${c.name}, ${c.state}`,
+        state: c.state,
+        severity: h.risk === "High" ? "High" : "Medium",
+        description: describeHazard(h.type, c),
+        time: timeStr,
+        note: h.note || ""
+      });
+    });
+  });
+
+  // Sort: High first, then Medium
+  return alerts.sort((a, b) => (a.severity === "High" ? 0 : 1) - (b.severity === "High" ? 0 : 1));
+}
+
+function describeHazard(type, c) {
+  switch (type) {
+    case "Flood": return `Live precipitation reading ${c.precipitation?.toFixed(1)} mm indicates elevated flood-related risk.`;
+    case "Waterlogging": return `Sustained rainfall (${c.precipitation?.toFixed(1)} mm) with high humidity (${c.humidity}%) — waterlogging risk.`;
+    case "Wind Storm": return `Live wind speed ${c.windSpeed?.toFixed(1)} km/h${c.pressure ? `, pressure ${c.pressure.toFixed(0)} hPa` : ""} — derived storm-risk signal.`;
+    case "Heat Stress": return `Live temperature ${c.temperature?.toFixed(1)}°C — heat-stress advisory.`;
+    case "Landslide": return `Heavy live rainfall (${c.precipitation?.toFixed(1)} mm) — elevated landslide-prone conditions.`;
+    case "Air Quality": return `Live US AQI ${c.aqi} — air quality advisory.`;
+    case "Seismic Activity": return c.note || `Recent seismic activity recorded nearby (USGS, monitoring only).`;
+    default: return "";
+  }
+}
+
+function populateFilterOptions() {
+  const types = [...new Set(allAlerts.map(a => a.type))];
+  document.getElementById("typeFilter").innerHTML = `<option value="all">All Types</option>` +
+    types.map(t => `<option value="${t}">${t}</option>`).join("");
+
+  const regions = [...new Set(allAlerts.map(a => a.location.split(", ")[1]))];
+  document.getElementById("regionFilter").innerHTML = `<option value="all">All Regions</option>` +
+    regions.map(r => `<option value="${r}">${r}</option>`).join("");
+
+  ["sevFilter", "typeFilter", "regionFilter"].forEach(id =>
+    document.getElementById(id).addEventListener("change", renderAlerts)
+  );
+}
+
+function renderAlerts() {
+  const sev = document.getElementById("sevFilter").value;
+  const type = document.getElementById("typeFilter").value;
+  const region = document.getElementById("regionFilter").value;
+
+  const sevMap = { High: "High", all: "all" };
+  const filtered = allAlerts.filter(a => {
+    if (sev !== "all") {
+      if (sev === "High" && a.severity !== "High") return false;
+      if (sev === "Moderate" && a.severity !== "Medium") return false;
+      if (sev === "Low" && a.severity !== "Medium") return false; // we don't surface Low, kept for UI parity
+    }
+    if (type !== "all" && a.type !== type) return false;
+    if (region !== "all" && !a.location.includes(region)) return false;
+    return true;
+  });
+
+  const high = allAlerts.filter(a => a.severity === "High").length;
+  const med = allAlerts.filter(a => a.severity === "Medium").length;
+  document.getElementById("summaryCards").innerHTML = `
+    <div class="card kpi-card"><div class="kpi-label">High Priority</div><div class="kpi-value" style="color:var(--anxious)">${high}</div></div>
+    <div class="card kpi-card"><div class="kpi-label">Medium Priority</div><div class="kpi-value" style="color:var(--stressed)">${med}</div></div>
+    <div class="card kpi-card"><div class="kpi-label">Low Priority</div><div class="kpi-value" style="color:var(--calm)">0</div></div>
+    <div class="card kpi-card"><div class="kpi-label">All Alerts</div><div class="kpi-value">${allAlerts.length}</div></div>
+  `;
+
+  const tbody = document.getElementById("alertsBody");
+  const empty = document.getElementById("alertsEmpty");
+  if (filtered.length === 0) {
+    tbody.innerHTML = ""; empty.style.display = "block"; return;
+  }
+  empty.style.display = "none";
+  tbody.innerHTML = filtered.map(a => `
+    <tr>
+      <td><strong>${a.type}</strong></td>
+      <td>${a.location}</td>
+      <td><span class="severity-badge ${a.severity === "High" ? "sev-high" : "sev-medium"}">${a.severity}</span></td>
+      <td style="max-width:360px;color:var(--text-secondary);">${a.description}</td>
+      <td style="white-space:nowrap;color:var(--text-muted);">${a.time}</td>
+    </tr>
+  `).join("");
+}
+
+loadAlerts();
+</script>
+</body>
+</html>

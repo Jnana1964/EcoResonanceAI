@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>EcoResonance AI — Dashboard</title>
+<link rel="stylesheet" href="css/style.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+</head>
+<body>
+<div id="shellRoot"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="js/cities.js"></script>
+<script src="js/api.js"></script>
+<script src="js/eri-engine.js"></script>
+<script src="js/layout.js"></script>
+<script>
+renderShell("dashboard", "Welcome back, Admin \u{1F44B}", "Monitor real-time environmental risk and intelligence across India");
+
+document.getElementById("pageBody").innerHTML = `
+  <div class="page-header-row" style="margin-top:-10px;">
+    <div></div>
+    <div class="controls-row">
+      <select class="select"><option>India</option></select>
+      <select class="select" id="cityFilter"><option>All Cities</option></select>
+      <button class="btn-primary" id="refreshBtn">\u{1F504} Refresh Data</button>
+    </div>
+  </div>
+
+  <div id="loadStatus" class="loading-note">Fetching live weather, air-quality and seismic data for 130 cities…</div>
+
+  <div class="kpi-grid" id="kpiGrid"></div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">Top 5 Cities by ERI <a class="link-small" href="live-map.html">View All \u2192</a></div>
+      <table id="top5Table"><thead><tr><th>#</th><th>City</th><th>ERI</th><th>State</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="card">
+      <div class="card-title">India Environmental Risk Map <a class="link-small" href="live-map.html">Full Map \u2192</a></div>
+      <div class="small-map-wrap"><div id="miniMap" style="height:100%;"></div></div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">Current Environmental Overview</div>
+      <div class="eri-gauge-wrap">
+        <div class="eri-gauge-value" id="gaugeValue">—</div>
+        <div class="eri-gauge-state" id="gaugeState">—</div>
+      </div>
+      <div class="param-list" id="gaugeParams"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">ERI Trend — Last 7 Days (India Avg.)</div>
+      <canvas id="eriTrendChart" height="220"></canvas>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">Active Alerts <a class="link-small" href="alerts.html">View All \u2192</a></div>
+      <div id="alertsPreview"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Environmental Hazard Distribution</div>
+      <canvas id="hazardDonut" height="220"></canvas>
+    </div>
+  </div>
+`;
+
+document.getElementById("refreshBtn").addEventListener("click", () => loadDashboard());
+
+let allCityResults = [];
+
+async function loadDashboard() {
+  const status = document.getElementById("loadStatus");
+  status.style.display = "block";
+  status.className = "loading-note";
+  status.textContent = "Fetching live weather, air-quality and seismic data for 130 cities…";
+
+  try {
+    const [live, seismic] = await Promise.all([
+      API.fetchLiveBatch(CITY_LIST, (done, total) => {
+        status.textContent = `Fetching live data… ${done}/${total} cities`;
+      }),
+      API.fetchSeismic()
+    ]);
+
+    allCityResults = live.map(c => {
+      const eriResult = ERI_ENGINE.computeERI(c, seismic);
+      return { ...c, ...eriResult };
+    });
+
+    status.style.display = "none";
+    renderDashboard(allCityResults);
+  } catch (err) {
+    status.className = "error-note";
+    status.textContent = "Live data fetch failed: " + err.message + " — check your network/API access and retry.";
+    console.error(err);
+  }
+}
+
+function renderDashboard(cities) {
+  const avgERI = cities.reduce((s, c) => s + c.eri, 0) / cities.length;
+  const avgState = ERI_ENGINE.STATES.find(s => avgERI <= s.max);
+  document.getElementById("earthMoodState").textContent = avgState.label;
+  document.getElementById("earthMoodScore").textContent = `ERI ${avgERI.toFixed(2)} / 1.00`;
+
+  const highAlertCities = cities.filter(c => c.eri >= 0.5);
+  document.getElementById("sidebarAlertBadge").textContent = highAlertCities.length;
+
+  // KPI cards
+  const kpis = [
+    { label: "Environmental Risk Index", value: avgERI.toFixed(2), badge: avgState.label, badgeClass: stateClass(avgState.label), icon: "\u{1F30D}", color: stateColorVar(avgState.label) },
+    { label: "Active Alerts", value: highAlertCities.length, sub: `${cities.filter(c => c.eri >= 0.75).length} high priority`, icon: "\u26A0\uFE0F", color: "var(--anxious)" },
+    { label: "Monitored Cities", value: cities.length + "+", sub: "Across India", icon: "\u{1F3D9}\uFE0F", color: "var(--green-primary)" },
+    { label: "Data Sources", value: "2 Live", sub: "Open-Meteo + USGS", icon: "\u{1F5C4}\uFE0F", color: "var(--blue)" },
+    { label: "Sources Online", value: `${cities.filter(c=>c.temperature!==null).length}/${cities.length}`, sub: "responding now", icon: "\u2705", color: "var(--calm)" }
+  ];
+
+  document.getElementById("kpiGrid").innerHTML = kpis.map(k => `
+    <div class="card kpi-card">
+      <div class="kpi-top">
+        <div class="kpi-label">${k.label}</div>
+        <div class="kpi-icon" style="background:${k.color}22;color:${k.color}">${k.icon}</div>
+      </div>
+      <div class="kpi-value">${k.value}</div>
+      ${k.badge ? `<span class="state-pill ${k.badgeClass}">${k.badge}</span>` : `<div class="kpi-delta">${k.sub}</div>`}
+    </div>
+  `).join("");
+
+  // Top 5 cities by ERI
+  const top5 = [...cities].sort((a, b) => b.eri - a.eri).slice(0, 5);
+  document.querySelector("#top5Table tbody").innerHTML = top5.map((c, i) => `
+    <tr>
+      <td><span class="rank-badge">${i + 1}</span></td>
+      <td><strong>${c.name}</strong><br><span style="color:var(--text-muted);font-size:11.5px;">${c.state}</span></td>
+      <td><strong>${c.eri.toFixed(2)}</strong></td>
+      <td><span class="state-pill ${stateClass(c.state)}">${c.state}</span></td>
+    </tr>
+  `).join("");
+
+  // Mini map
+  renderMiniMap(cities);
+
+  // Gauge = highest-risk city right now (mirrors reference "selected city" concept)
+  const topCity = top5[0];
+  document.getElementById("gaugeValue").textContent = topCity.eri.toFixed(2);
+  document.getElementById("gaugeState").innerHTML = `<span class="state-pill ${stateClass(topCity.state)}">${topCity.state.toUpperCase()}</span> — ${topCity.name}`;
+  document.getElementById("gaugeParams").innerHTML = paramListHTML(topCity);
+
+  // ERI 7-day trend for the top city (real archive data)
+  API.fetchHistory(topCity, 7).then(hist => {
+    const labels = hist.map(h => new Date(h.date).toLocaleDateString("en-IN", { day: "2-digit", month: "short" }));
+    const data = hist.map(h => {
+      const proxy = ERI_ENGINE.computeERI({
+        ...topCity, precipitation: h.rainfall, windSpeed: h.windMax,
+        humidity: h.humidity, pressure: h.pressure, temperature: h.tempMax
+      }, []);
+      return proxy.eri;
+    });
+    drawLineChart("eriTrendChart", labels, data, "ERI");
+  });
+
+  // Alerts preview (top 4 highest ERI cities as alert rows)
+  const alertRows = top5.slice(0, 4).map(c => {
+    const hazards = ERI_ENGINE.assessHazards(c, c);
+    const topHazard = hazards.sort((a,b)=> riskRank(b.risk)-riskRank(a.risk))[0];
+    return { city: c, hazard: topHazard };
+  });
+  document.getElementById("alertsPreview").innerHTML = alertRows.map(r => `
+    <div class="alert-row">
+      <div class="alert-icon" style="background:${severityColor(r.hazard.risk)}22;color:${severityColor(r.hazard.risk)}">${hazardIcon(r.hazard.type)}</div>
+      <div>
+        <div class="alert-title">${r.hazard.type} ${r.hazard.risk === "High" ? "Warning" : "Advisory"}</div>
+        <div class="alert-meta">${r.city.name}, ${r.city.state}</div>
+      </div>
+      <span class="severity-badge ${"sev-" + r.hazard.risk.toLowerCase()}">${r.hazard.risk}</span>
+    </div>
+  `).join("");
+
+  // Hazard distribution donut (ERI state buckets across all cities)
+  const buckets = ["Calm", "Disturbed", "Stressed", "Anxious"].map(s => cities.filter(c => c.state === s).length);
+  drawDonut("hazardDonut", ["Calm", "Disturbed", "Stressed", "Anxious"], buckets,
+    [getCSS("--calm"), getCSS("--disturbed"), getCSS("--stressed"), getCSS("--anxious")]);
+
+  // City filter dropdown
+  const filter = document.getElementById("cityFilter");
+  filter.innerHTML = `<option>All Cities</option>` + cities.map(c => `<option>${c.name}</option>`).join("");
+}
+
+function paramListHTML(c) {
+  const rows = [
+    ["\u{1F327}\uFE0F", "Rainfall", c.precipitation != null ? c.precipitation.toFixed(1) + " mm" : "—"],
+    ["\u{1F4A7}", "Humidity", c.humidity != null ? c.humidity + "%" : "—"],
+    ["\u{1F321}\uFE0F", "Temperature", c.temperature != null ? c.temperature.toFixed(1) + "°C" : "—"],
+    ["\u{1F32C}\uFE0F", "Wind Speed", c.windSpeed != null ? c.windSpeed.toFixed(1) + " km/h" : "—"],
+    ["\u{1F30B}", "AQI", c.aqi != null ? c.aqi : "—"],
+    ["\u{1F4CA}", "Pressure", c.pressure != null ? c.pressure.toFixed(0) + " hPa" : "—"]
+  ];
+  return rows.map(([icon, name, val]) => `
+    <div class="param-row"><span class="param-icon">${icon}</span><span class="param-name">${name}</span><span class="param-value">${val}</span></div>
+  `).join("");
+}
+
+function riskRank(r) { return { Low: 0, Moderate: 1, High: 2 }[r] ?? 0; }
+function severityColor(r) { return { High: "var(--anxious)", Moderate: "var(--stressed)", Low: "var(--calm)" }[r]; }
+function hazardIcon(type) {
+  return { Flood: "\u{1F30A}", Waterlogging: "\u{1F4A7}", "Wind Storm": "\u{1F32C}\uFE0F", "Heat Stress": "\u{1F525}", Landslide: "\u26F0\uFE0F", "Air Quality": "\u{1F32B}\uFE0F", "Seismic Activity": "\u{1F30D}" }[type] || "\u26A0\uFE0F";
+}
+function getCSS(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+loadDashboard();
+</script>
+<script src="js/charts.js"></script>
+<script src="js/minimap.js"></script>
+</body>
+</html>
