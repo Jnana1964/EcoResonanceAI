@@ -1,91 +1,158 @@
-# EcoResonance AI
+<div align="center">
 
-Real-Time Environmental Intelligence and Monitoring System — India.
+# 🌍 EcoResonance AI
 
-This is a **static, client-side web app** (plain HTML/CSS/JS, no build step,
-no backend server, no API keys). Every number you see comes from a live
-public API call made directly from your browser when you open the page.
-Nothing is hardcoded or simulated.
+**Many Environmental Signals → One Interpretable Index**
 
-## How to run it
+Collect → Validate → Normalise → Analyse → EcoResonance Index (ERI) → Dashboard
 
-Because the pages fetch live data, don't just double-click the HTML files
-(some browsers restrict `fetch` on `file://` pages). Serve the folder locally:
+<img src="https://img.shields.io/badge/status-in%20development-e0af68?style=flat-square" />
+<img src="https://img.shields.io/badge/Python-Flask-3776AB?style=flat-square&logo=flask&logoColor=white" />
+<img src="https://img.shields.io/badge/Pandas-NumPy-150458?style=flat-square&logo=pandas&logoColor=white" />
+<img src="https://img.shields.io/badge/Scikit--learn-F7931E?style=flat-square&logo=scikitlearn&logoColor=white" />
+<img src="https://img.shields.io/badge/Leaflet-Chart.js-199900?style=flat-square&logo=leaflet&logoColor=white" />
+<img src="https://img.shields.io/badge/Data-Open--Meteo%20%7C%20NASA%20POWER-0B3D91?style=flat-square&logo=nasa&logoColor=white" />
 
-```bash
-cd ecoresonance
-python3 -m http.server 8080
-# then open http://localhost:8080 in your browser
+**Paper:** Presented at ICSIE 2026 (17th International Conference on Science & Innovative Engineering)
+
+</div>
+
+---
+
+Weather and air-quality dashboards show temperature, humidity, rainfall, wind, pressure and AQI as **separate numbers**, which makes it hard to see how conditions change together. EcoResonance AI combines them into one composite score, the **EcoResonance Index (ERI)**, and shows it on a dashboard, a map and location-level insights.
+
+> ⚠️ **This is a monitoring and interpretation tool, not a disaster predictor.** ERI is a project-defined index, not an official risk classification or warning system.
+
+## The EcoResonance Index
+
+```
+ERI = Σ (wᵢ · xᵢ)      xᵢ = normalised parameter value,  Σ wᵢ = 1
 ```
 
-or use the VS Code "Live Server" extension, or host it on any static host
-(GitHub Pages, Netlify, Vercel — all work with zero config).
-
-## Pages
-
-| Page | File | What it shows |
+| ERI | State | |
 |---|---|---|
-| Dashboard | `index.html` | KPIs, top-5 cities by ERI, mini map, ERI trend, alerts preview, hazard distribution |
-| Live Map | `live-map.html` | Full India map with switchable layers (Rainfall, Cloud Cover, Wind Flow, Temperature, Pressure, AQI, Seismic), live hazard overview, city snapshot strip |
-| Alerts | `alerts.html` | All active environmental alerts generated from live threshold checks, filterable |
-| History & Trends | `history.html` | Real historical archive data per city, ERI trend, parameter trends, generated insights |
+| 0.00 – 0.25 | Calm | 🟢 |
+| 0.25 – 0.50 | Disturbed | 🟡 |
+| 0.50 – 0.75 | Stressed | 🟠 |
+| 0.75 – 1.00 | Anxious | 🔴 |
 
-*City Insights was intentionally left out per your instruction to build only
-the four core screens.*
+**Inputs:** temperature · humidity · precipitation · wind speed · pressure · AQI · PM2.5 · UV index
 
-## Data sources (all real, free, key-less, CORS-enabled)
+## Modules
 
-- **Open-Meteo Forecast API** — temperature, humidity, precipitation, wind
-  speed/direction, pressure, cloud cover (live, per city)
-- **Open-Meteo Air Quality API** — US AQI, PM2.5, PM10 (live, per city)
-- **Open-Meteo Archive API** — historical daily weather (History & Trends page)
-- **USGS Earthquake GeoJSON feed** — real recent seismic events, used strictly
-  as a monitoring signal
+| Page | What it shows |
+|---|---|
+| 📊 **Dashboard** | Current ERI, parameter cards, ERI trend, alert summary |
+| 🗺️ **Live Map** | Leaflet map with ERI, temperature, AQI, UV and rain layers; city search |
+| 🏙️ **City Insights** | One location in depth: measurements, ERI, interpretation, trends |
+| 🚨 **Alerts** | Threshold-based alerts by severity, with history and filters |
+| 📈 **History & Trends** | Date-range ERI and parameter trends, period summaries |
 
-No satellite imagery, no NASA feed, and no live cyclone-track feed is used —
-none of those are available for free/key-less browser use. Say so plainly if
-asked in an interview.
+## Architecture
 
-## The ERI (Environmental Risk Index) — what it actually is
+```
+Open-Meteo (live) ─┐
+                   ├─► Collect → Clean & validate → Normalise → Features → ERI / ML
+NASA POWER (hist) ─┘                                                       │
+                                                                           ▼
+                                                                 Flask REST API
+                                                                           │
+                                         Dashboard · Live Map · City Insights · Alerts · History
+```
 
-`ERI = Σ(weight_i × normalized_value_i) / Σ(weight_i)`
+## Status
 
-Seven live signals are normalized to 0–1 (rainfall, wind, humidity, pressure
-deviation, AQI, temperature stress, seismic proximity) and combined with
-documented weights — see `js/eri-engine.js`. The thresholds used for
-normalization (e.g. 50mm/hr = "extremely heavy rain") are drawn from standard
-meteorological/AQI references, not custom-tuned or validated science.
+<!-- Tick ONLY what is merged, running and tested. -->
 
-**Say this in an interview:**
-> "ERI is our project's own composite indicator, not an officially recognized
-> disaster probability. It summarizes how far current live conditions deviate
-> from calm baseline conditions across multiple real signals."
+- [ ] Five-page frontend (HTML / CSS / JS, Chart.js, Leaflet)
+- [ ] Flask backend + REST API
+- [ ] Open-Meteo live integration
+- [ ] NASA POWER historical integration
+- [ ] Cleaning, normalisation, missing-data handling
+- [ ] ERI weights and normalisation documented and validated
+- [ ] Alert and history logic
+- [ ] CNN-LSTM time-series experiments (TensorFlow / Keras)
+- [ ] Tests and evaluation
 
-## Storm / wind-hazard risk — how it's derived
+## Deep dive
 
-There is no free, live, key-less API that gives an actual tracked cyclone
-position. The Live Map does **not** draw a fake storm spiral. Instead, "Wind
-Storm" risk is derived transparently from two real signals: live wind speed
-and a live pressure drop (low pressure near 1013 hPa baseline). This is
-disclosed directly in the UI ("derived storm-risk signal", "not a tracked
-storm system") — don't oversell it as cyclone tracking.
+<details>
+<summary><b>📐 What ERI still needs before it means anything</b></summary>
 
-## Things this project explicitly does NOT claim
+- Normalisation method per parameter (min-max vs. z-score, fixed vs. rolling range)
+- Direction of each parameter (is higher worse?)
+- How the weights are chosen and justified
+- How missing parameters are handled
+- How the index is validated against real conditions
 
-- It does **not** predict earthquakes.
-- It does **not** guarantee any disaster will happen.
-- ERI is **not** an official/scientific disaster-probability score.
-- It is **not** a live cyclone-tracking system.
-- "System Confidence: 92%" from the mockup was deliberately **not**
-  implemented as a fake number — the Live Map instead shows real "sources
-  online" / "cities reporting" counts.
+Until these are written down, ERI is a design, not a validated metric.
 
-## Known limitations to be upfront about
+</details>
 
-- Open-Meteo's free tier has fair-use rate limits; loading all 130 cities on
-  every page load is several batched requests — if you hit a rate limit,
-  the status banner will show the real error rather than fabricating data.
-- The mini/full maps are OpenStreetMap tile layers with per-city markers —
-  not a satellite-image or radar overlay.
-- Historical "archive" data has roughly a 2-day reporting lag at the source,
-  so today/yesterday won't appear in History & Trends.
+<details>
+<summary><b>🌐 Data sources</b></summary>
+
+| Source | Used for |
+|---|---|
+| [Open-Meteo](https://open-meteo.com/) | Live and forecast temperature, humidity, precipitation, wind, pressure, air quality |
+| [NASA POWER](https://power.larc.nasa.gov/) | Historical temperature, humidity, wind, pressure, precipitation |
+
+Which fields you get depends on location, provider and time period.
+
+</details>
+
+<details>
+<summary><b>🧠 Planned CNN-LSTM model</b></summary>
+
+- **CNN:** extracts local patterns across parameters
+- **LSTM:** learns how they change over time
+- Training data, target variable and metrics are documented once the model is trained. **No accuracy is claimed yet.**
+
+</details>
+
+<details>
+<summary><b>🔐 Data-integrity rules</b></summary>
+
+- Demo data is never presented as live
+- No fabricated measurements or history
+- No claims about unsupported cities
+- Missing data is shown as missing
+- Every value keeps its source and timestamp
+
+</details>
+
+<details>
+<summary><b>🌱 SDGs</b></summary>
+
+**SDG 13** Climate Action · **SDG 11** Sustainable Cities and Communities, through access to environmental information (monitoring only, not mitigation).
+
+</details>
+
+<details>
+<summary><b>📁 Project structure</b></summary>
+
+```
+EcoResonanceAI/
+├── backend/    app.py · routes · services · data_pipeline · models · utils
+├── frontend/   templates · static (css, js, images)
+├── data/       raw · processed · demo
+├── config/ · docs/ · tests/
+└── requirements.txt
+```
+
+</details>
+
+## Tech stack
+
+**Backend:** Python, Flask · **Data:** Pandas, NumPy, Scikit-learn · **DL (planned):** TensorFlow / Keras
+**Frontend:** HTML, CSS, JavaScript, Bootstrap, Chart.js, Leaflet · **Data sources:** Open-Meteo, NASA POWER
+
+---
+
+<div align="center">
+
+Built by **[Bollu Jnana Keerthana](https://github.com/Jnana1964)** · B.Tech CSE, SRM IST · [Portfolio](https://jnana1964.github.io)
+
+<sub>Academic project. Not a substitute for official weather, pollution or emergency advisories.</sub>
+
+</div>
